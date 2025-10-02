@@ -1,0 +1,78 @@
+name: Auto Release
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version from manifest.json
+        id: version
+        run: |
+          MANIFEST="custom_components/umnyeseti/manifest.json"
+          VER=$(jq -r '.version' "$MANIFEST")
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Detect last released version (if any)
+        id: lastrel
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            try {
+              const rel = await github.rest.repos.getLatestRelease({ owner, repo });
+              core.setOutput('tag', rel.data.tag_name || '');
+            } catch (e) {
+              core.setOutput('tag', '');
+            }
+
+      - name: Check if tag exists
+        id: tagexists
+        run: |
+          TAG="v${{ steps.version.outputs.version }}"
+          if git ls-remote --tags origin | grep -q "refs/tags/${TAG}$"; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Guard (skip if same version or tag exists)
+        id: guard
+        run: |
+          CUR="v${{ steps.version.outputs.version }}"
+          PREV="${{ steps.lastrel.outputs.tag }}"
+          EXISTS="${{ steps.tagexists.outputs.exists }}"
+          echo "Current: $CUR  Previous: $PREV  TagExists: $EXISTS"
+          if [ "$CUR" = "$PREV" ] || [ "$EXISTS" = "true" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Zip component
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          cd custom_components/umnyeseti
+          zip -r ../../umnyeseti.zip ./*
+
+      - name: Create/Update release
+        if: steps.guard.outputs.skip != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: Release ${{ steps.version.outputs.version }}
+          files: umnyeseti.zip
+          generate_release_notes: true
+          allowUpdates: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

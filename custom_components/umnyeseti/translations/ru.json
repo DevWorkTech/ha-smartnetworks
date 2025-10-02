@@ -1,0 +1,88 @@
+{
+  "title": "Умные Сети",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Умные Сети",
+        "description": "Логин и пароль от https://stat.umnyeseti.ru",
+        "data": {
+          "login": "Логин",
+          "password": "Пароль",
+          "verify_ssl": "Проверять SSL-сертификаты",
+          "update_interval": "Интервал обновления (мин)"
+        }
+      }
+    },
+    "error": {
+      "auth_failed": "Ошибка авторизации: {reason}",
+      "cannot_connect": "Не удалось подключиться к серверу."
+    },
+    "abort": {
+      "already_configured": "Этот аккаунт уже настроен."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Умные Сети — Настройки",
+        "description": "Отрегулируйте параметры интеграции.",
+        "data": {
+          "verify_ssl": "Проверять SSL-сертификаты",
+          "update_interval": "Интервал обновления (мин)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Статус"
+      },
+      "account": {
+        "name": "Лицевой счёт"
+      },
+      "balance": {
+        "name": "Баланс"
+      },
+      "subscriber": {
+        "name": "Абонент"
+      },
+      "address": {
+        "name": "Адрес"
+      },
+      "ip": {
+        "name": "IP-адрес"
+      },
+      "mac": {
+        "name": "MAC-адрес"
+      },
+      "vlan": {
+        "name": "VLAN"
+      },
+      "tariff_name": {
+        "name": "Тариф"
+      },
+      "tariff_speed": {
+        "name": "Скорость"
+      },
+      "tariff_amount": {
+        "name": "Стоимость тарифа"
+      },
+      "tariff_period": {
+        "name": "Период списаний"
+      },
+      "tariff_end": {
+        "name": "Окончание подписки"
+      },
+      "tariff_pay_left": {
+        "name": "К оплате"
+      },
+      "pays": {
+        "name": "Платежи"
+      },
+      "last_update": {
+        "name": "Последнее обновление"
+      }
+    }
+  }
+}

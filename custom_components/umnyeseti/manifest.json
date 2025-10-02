@@ -1,0 +1,21 @@
+{
+  "domain": "umnyeseti",
+  "name": "Умные Сети (Smart Networks)",
+  "version": "1.0.7",
+  "documentation": "https://github.com/DevWorkTech/ha-smartnetworks",
+  "issue_tracker": "https://github.com/DevWorkTech/ha-smartnetworks/issues",
+  "codeowners": [
+    "@DevWorkTech",
+    "@sh1z0fer"
+  ],
+  "iot_class": "cloud_polling",
+  "loggers": [
+    "custom_components.umnyeseti"
+  ],
+  "requirements": [],
+  "config_flow": true,
+  "integration_type": "service",
+  "categories": [
+    "internet"
+  ]
+}

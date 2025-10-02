@@ -1,0 +1,88 @@
+{
+  "title": "Smart Networks",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Smart Networks",
+        "description": "Login and password from https://stat.umnyeseti.ru",
+        "data": {
+          "login": "Login",
+          "password": "Password",
+          "verify_ssl": "Verify SSL certificates",
+          "update_interval": "Update interval (min)"
+        }
+      }
+    },
+    "error": {
+      "auth_failed": "Authorization error: {reason}",
+      "cannot_connect": "Cannot connect to server."
+    },
+    "abort": {
+      "already_configured": "This account is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Smart Networks — Settings",
+        "description": "Adjust integration settings.",
+        "data": {
+          "verify_ssl": "Verify SSL certificates",
+          "update_interval": "Update interval (min)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Status"
+      },
+      "account": {
+        "name": "Account"
+      },
+      "balance": {
+        "name": "Balance"
+      },
+      "subscriber": {
+        "name": "Subscriber"
+      },
+      "address": {
+        "name": "Address"
+      },
+      "ip": {
+        "name": "IP address"
+      },
+      "mac": {
+        "name": "MAC address"
+      },
+      "vlan": {
+        "name": "VLAN"
+      },
+      "tariff_name": {
+        "name": "Tariff"
+      },
+      "tariff_speed": {
+        "name": "Speed"
+      },
+      "tariff_amount": {
+        "name": "Tariff price"
+      },
+      "tariff_period": {
+        "name": "Billing period"
+      },
+      "tariff_end": {
+        "name": "Subscription end"
+      },
+      "tariff_pay_left": {
+        "name": "To pay"
+      },
+      "pays": {
+        "name": "Payments"
+      },
+      "last_update": {
+        "name": "Last update"
+      }
+    }
+  }
+}
