@@ -13,6 +13,26 @@ from .const import DOMAIN, CONF_LOGIN
 from .coordinator import UmnyeSetiCoordinator
 
 
+SENSOR_NAME = {
+    "status": "Статус",
+    "account": "Лицевой счёт",
+    "balance": "Баланс",
+    "subscriber": "Абонент",
+    "address": "Адрес",
+    "ip": "IP-адрес",
+    "mac": "MAC-адрес",
+    "vlan": "VLAN",
+    "tariff_name": "Тариф",
+    "tariff_speed": "Скорость",
+    "tariff_amount": "Стоимость тарифа",
+    "tariff_period": "Период списаний",
+    "tariff_end": "Окончание подписки",
+    "tariff_pay_left": "К оплате",
+    "pays": "Платежи",
+    "last_update": "Последнее обновление",
+}
+
+
 ICON = {
     "status": "mdi:information-outline",
     "account": "mdi:account-card",
@@ -64,7 +84,10 @@ class BaseUmnyeSetiSensor(CoordinatorEntity[UmnyeSetiCoordinator], SensorEntity)
         login = entry.data.get(CONF_LOGIN)
         suffix = name_suffix or key
         self._attr_unique_id = f"umnyeseti_{login}_{suffix}"
-        self._attr_translation_key = suffix
+        # Keep the original human-friendly Russian names stable regardless of
+        # Home Assistant backend language or translation cache. unique_id is
+        # intentionally unchanged, so existing history and automations remain.
+        self._attr_name = SENSOR_NAME.get(suffix, suffix)
         icon = ICON.get(suffix)
         if icon:
             self._attr_icon = icon
