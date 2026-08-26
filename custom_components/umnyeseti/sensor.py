@@ -234,28 +234,85 @@ class TariffEndSensor(BaseUmnyeSetiSensor):
         return {"scheduled_end": t.get("end_subscribe")}
 
 class PaymentsSensor(BaseUmnyeSetiSensor):
+    """Payment history exposed as a normal HA sensor.
+
+    Older versions used the literal state "Открыть".  A SensorEntity cannot
+    execute an action when its state text is clicked, so the UI looked like a
+    broken button.  Keep the same unique_id, but expose a useful state and
+    scalar attributes that Home Assistant's standard more-info dialog renders
+    reliably.  The original ``pays`` list is kept for backwards compatibility.
+    """
+
+    _MAX_VISIBLE_PAYMENTS = 30
+
     def __init__(self, coordinator: UmnyeSetiCoordinator, entry: ConfigEntry):
         super().__init__(coordinator, entry, "pays", "pays")
 
+    @staticmethod
+    def _plural_payments_ru(count: int) -> str:
+        last = count % 10
+        last2 = count % 100
+        if last == 1 and last2 != 11:
+            word = "платёж"
+        elif 2 <= last <= 4 and not 12 <= last2 <= 14:
+            word = "платежа"
+        else:
+            word = "платежей"
+        return f"{count} {word}"
+
+    @staticmethod
+    def _format_payment(payment: dict) -> str:
+        date = payment.get("date") or "дата неизвестна"
+        amount = payment.get("amount")
+        if amount is None:
+            return str(date)
+        try:
+            amount_text = f"{float(amount):.2f} ₽"
+        except (TypeError, ValueError):
+            amount_text = f"{amount} ₽"
+        return f"{date} — {amount_text}"
+
     @property
     def native_value(self):
-        return "Открыть"
+        pays = self._get_pays()
+        if pays is None:
+            return None
+        return self._plural_payments_ru(len(pays))
 
     @property
     def extra_state_attributes(self):
         pays = self._get_pays()
-        return {"pays": pays} if pays is not None else None
+        if pays is None:
+            return None
+
+        attrs: dict[str, Any] = {
+            "Количество платежей": len(pays),
+            # Compatibility with automations/templates that already use
+            # state_attr('sensor....', 'pays').
+            "pays": pays,
+        }
+
+        visible = pays[: self._MAX_VISIBLE_PAYMENTS]
+        if visible:
+            attrs["Последний платёж"] = self._format_payment(visible[0])
+            for index, payment in enumerate(visible, start=1):
+                attrs[f"Платёж {index}"] = self._format_payment(payment)
+
+        if len(pays) > self._MAX_VISIBLE_PAYMENTS:
+            attrs["Показано платежей"] = self._MAX_VISIBLE_PAYMENTS
+
+        return attrs
 
     @property
     def icon(self):
         return "mdi:credit-card-outline"
 
-
     def _get_pays(self):
         st = self.coordinator.data
         if not st or not st.data:
             return None
-        return st.data.get("pays")
+        pays = st.data.get("pays")
+        return pays if isinstance(pays, list) else []
 
 class LastUpdateSensor(BaseUmnyeSetiSensor):
     def __init__(self, coordinator: UmnyeSetiCoordinator, entry: ConfigEntry):

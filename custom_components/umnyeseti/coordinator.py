@@ -649,7 +649,16 @@ class UmnyeSetiCoordinator(DataUpdateCoordinator[UmnyeSetiState]):
                 address = addr.get("vc_code", address) or self._localize_unknown()
 
         pays = []
-        for p in data.get("activities", []):
+        activities = data.get("activities") or []
+        # ISO timestamps sort lexicographically, so keep the newest operation
+        # first. This makes "Последний платёж" deterministic even if the
+        # provider changes the order of the activities array.
+        activities = sorted(
+            (p for p in activities if isinstance(p, dict)),
+            key=lambda p: str(p.get("d_oper") or ""),
+            reverse=True,
+        )
+        for p in activities:
             iso = p.get("d_oper")
             amount = self._money(p.get("n_value_1"))
             human = self._to_human(iso)
