@@ -14,6 +14,7 @@ from homeassistant.util import dt as dt_util
 from homeassistant.helpers import issue_registry as ir
 
 from .api import UmnyeSetiApi
+from .payment import build_payment_url
 from .const import (
     DOMAIN,
     DEFAULT_UPDATE_INTERVAL,
@@ -238,14 +239,23 @@ class UmnyeSetiCoordinator(DataUpdateCoordinator[UmnyeSetiState]):
             lines.append(f"Amount needed to renew: {pay_left}")
         return title, "\n".join(lines)
 
-    async def _async_create_persistent_tariff_notification(self, title: str, message: str) -> bool:
+    async def _async_create_persistent_tariff_notification(
+        self, title: str, message: str, payment_url: str | None = None
+    ) -> bool:
         try:
+            persistent_message = message
+            if payment_url:
+                label = "Оплатить" if self._lang().startswith("ru") else "Pay now"
+                # persistent_notification supports Markdown links. A heading makes
+                # the payment action prominent in the Home Assistant notification panel.
+                persistent_message = f"{message}\n\n### [💳 {label}]({payment_url})"
+
             await self.hass.services.async_call(
                 "persistent_notification",
                 "create",
                 {
                     "title": title,
-                    "message": message,
+                    "message": persistent_message,
                     "notification_id": self._tariff_notification_id(),
                 },
                 blocking=True,
@@ -272,18 +282,30 @@ class UmnyeSetiCoordinator(DataUpdateCoordinator[UmnyeSetiState]):
                 DOMAIN, type(e).__name__, e
             )
 
-    async def _async_send_mobile_tariff_notification(self, service: str, title: str, message: str) -> bool:
+    async def _async_send_mobile_tariff_notification(
+        self, service: str, title: str, message: str, payment_url: str | None = None
+    ) -> bool:
         try:
+            notification_data = {
+                "tag": self._tariff_notification_tag(),
+                "group": "umnyeseti_tariff",
+            }
+            if payment_url:
+                notification_data["actions"] = [
+                    {
+                        "action": "URI",
+                        "title": "Оплатить" if self._lang().startswith("ru") else "Pay now",
+                        "uri": payment_url,
+                    }
+                ]
+
             await self.hass.services.async_call(
                 "notify",
                 service,
                 {
                     "title": title,
                     "message": message,
-                    "data": {
-                        "tag": self._tariff_notification_tag(),
-                        "group": "umnyeseti_tariff",
-                    },
+                    "data": notification_data,
                 },
                 blocking=True,
             )
@@ -371,6 +393,7 @@ class UmnyeSetiCoordinator(DataUpdateCoordinator[UmnyeSetiState]):
             return
 
         title, message = self._tariff_notification_text(mapped, days)
+        payment_url = build_payment_url(mapped.get("account"), tariff.get("pay_subscribe"))
 
         # Reusing one notification_id/tag means 3 days replaces 5 days, and
         # tomorrow replaces 3 days instead of leaving several stale warnings.
@@ -383,7 +406,7 @@ class UmnyeSetiCoordinator(DataUpdateCoordinator[UmnyeSetiState]):
             state_changed = True
 
         if not self._tariff_notification_state.get("persistent_sent", False):
-            if await self._async_create_persistent_tariff_notification(title, message):
+            if await self._async_create_persistent_tariff_notification(title, message, payment_url):
                 self._tariff_notification_state["persistent_sent"] = True
                 state_changed = True
                 _LOGGER.info(
@@ -404,7 +427,7 @@ class UmnyeSetiCoordinator(DataUpdateCoordinator[UmnyeSetiState]):
                 )
         else:
             for service in missing_services:
-                if await self._async_send_mobile_tariff_notification(service, title, message):
+                if await self._async_send_mobile_tariff_notification(service, title, message, payment_url):
                     notified_services.add(service)
                     state_changed = True
                     _LOGGER.info(

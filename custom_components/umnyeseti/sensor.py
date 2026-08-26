@@ -11,6 +11,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN, CONF_LOGIN
 from .coordinator import UmnyeSetiCoordinator
+from .payment import build_payment_url
 
 
 SENSOR_NAME = {
@@ -68,7 +69,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, add_entitie
         MoneyNestedSensor(coordinator, entry, "tariff_amount", ["tariff", "amount"], "tariff_amount"),
         NestedValueSensor(coordinator, entry, "tariff_period", ["tariff", "period"], "tariff_period"),
         TariffEndSensor(coordinator, entry),
-        MoneyNestedSensor(coordinator, entry, "tariff_pay_left", ["tariff", "pay_subscribe"], "tariff_pay_left"),
+        TariffPayLeftSensor(coordinator, entry),
         PaymentsSensor(coordinator, entry),
         LastUpdateSensor(coordinator, entry),
     ]
@@ -231,7 +232,28 @@ class TariffEndSensor(BaseUmnyeSetiSensor):
         if not st or not st.data:
             return None
         t = st.data.get("tariff") or {}
-        return {"scheduled_end": t.get("end_subscribe")}
+        attrs = {"scheduled_end": t.get("end_subscribe")}
+        payment_url = build_payment_url(st.data.get("account"), t.get("pay_subscribe"))
+        if payment_url:
+            attrs["Оплатить"] = payment_url
+        return attrs
+
+class TariffPayLeftSensor(MoneyNestedSensor):
+    """Amount required to renew, with a ready-to-use external payment URL."""
+
+    def __init__(self, coordinator: UmnyeSetiCoordinator, entry: ConfigEntry):
+        super().__init__(
+            coordinator, entry, "tariff_pay_left", ["tariff", "pay_subscribe"], "tariff_pay_left"
+        )
+
+    @property
+    def extra_state_attributes(self):
+        st = self.coordinator.data
+        if not st or not st.data:
+            return None
+        tariff = st.data.get("tariff") or {}
+        payment_url = build_payment_url(st.data.get("account"), tariff.get("pay_subscribe"))
+        return {"Оплатить": payment_url} if payment_url else None
 
 class PaymentsSensor(BaseUmnyeSetiSensor):
     """Payment history in a compact, human-readable Home Assistant view."""
@@ -307,6 +329,15 @@ class PaymentsSensor(BaseUmnyeSetiSensor):
 
         if len(pays) > self._MAX_VISIBLE_PAYMENTS:
             attrs["Показано платежей"] = self._MAX_VISIBLE_PAYMENTS
+
+        st = self.coordinator.data
+        tariff = (st.data.get("tariff") or {}) if st and st.data else {}
+        payment_url = build_payment_url(
+            st.data.get("account") if st and st.data else None,
+            tariff.get("pay_subscribe"),
+        )
+        if payment_url:
+            attrs["Оплатить"] = payment_url
 
         return attrs
 
