@@ -183,32 +183,46 @@ class UmnyeSetiCoordinator(DataUpdateCoordinator[UmnyeSetiState]):
             return []
 
     def _money_text(self, value) -> str | None:
+        """Format money for human-readable notifications, not payment URLs."""
         try:
             if value is None:
                 return None
-            return f"{float(value):.2f} ₽"
+            amount = float(value)
+            if amount.is_integer():
+                return f"{int(amount)} ₽"
+            return f"{amount:.2f}".replace(".", ",") + " ₽"
         except Exception:
             return None
+
+    @staticmethod
+    def _notification_end_date(value) -> str | None:
+        """Return only the calendar date for the notification body."""
+        if value in (None, ""):
+            return None
+        text = str(value).strip()
+        if "," in text:
+            text = text.split(",", 1)[0].strip()
+        return text or None
 
     def _tariff_notification_text(self, mapped: dict, days: int) -> tuple[str, str]:
         ru = self._lang().startswith("ru")
         tariff = mapped.get("tariff") or {}
         name = tariff.get("name") or ("тариф" if ru else "plan")
-        end_date = tariff.get("end_subscribe")
+        end_date = self._notification_end_date(tariff.get("end_subscribe"))
         balance = self._money_text(mapped.get("balance"))
         pay_left = self._money_text(tariff.get("pay_subscribe"))
         account = mapped.get("account")
 
         if ru:
             if days == 1:
-                title = "🚨 Умные Сети: тариф закончится завтра"
-                intro = f"Оплаченный тариф «{name}» закончится завтра."
+                title = "⚠️ Умные Сети: тариф закончится завтра"
+                intro = "До окончания оплаченного тарифа остался 1 день."
             elif days == 3:
                 title = "⚠️ Умные Сети: до окончания тарифа 3 дня"
-                intro = f"До окончания оплаченного тарифа «{name}» осталось 3 дня."
+                intro = "До окончания оплаченного тарифа осталось 3 дня."
             else:
                 title = "⚠️ Умные Сети: до окончания тарифа 5 дней"
-                intro = f"До окончания оплаченного тарифа «{name}» осталось 5 дней."
+                intro = "До окончания оплаченного тарифа осталось 5 дней."
 
             lines = [intro]
             if end_date:
@@ -222,7 +236,7 @@ class UmnyeSetiCoordinator(DataUpdateCoordinator[UmnyeSetiState]):
             return title, "\n".join(lines)
 
         if days == 1:
-            title = "🚨 Smart Networks: plan expires tomorrow"
+            title = "⚠️ Smart Networks: plan expires tomorrow"
             intro = f"Your paid plan “{name}” expires tomorrow."
         else:
             title = f"⚠️ Smart Networks: plan expires in {days} days"
@@ -294,7 +308,7 @@ class UmnyeSetiCoordinator(DataUpdateCoordinator[UmnyeSetiState]):
                 notification_data["actions"] = [
                     {
                         "action": "URI",
-                        "title": "Оплатить" if self._lang().startswith("ru") else "Pay now",
+                        "title": "💳 Оплатить" if self._lang().startswith("ru") else "💳 Pay now",
                         "uri": payment_url,
                     }
                 ]
