@@ -1,4 +1,6 @@
 from __future__ import annotations
+import logging
+
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
@@ -14,6 +16,30 @@ from .const import (
     MIN_UPDATE_INTERVAL,
 )
 from .api import UmnyeSetiApi
+
+_LOGGER = logging.getLogger(__name__)
+
+def _mask_login(login: str) -> str:
+    value = str(login or "")
+    if len(value) <= 2:
+        return "*" * len(value)
+    return f"{value[:1]}***{value[-1:]}"
+
+def _config_error_reason(api: UmnyeSetiApi, fallback: str) -> str:
+    details = api.last_error_details
+    if not details:
+        return fallback
+    stage = details.get("stage")
+    code = details.get("code")
+    status = details.get("http_status")
+    message = details.get("message") or fallback
+    parts = [str(message)]
+    technical = " / ".join(str(x) for x in (stage, code) if x)
+    if technical:
+        parts.append(f"[{technical}]")
+    if status is not None:
+        parts.append(f"HTTP {status}")
+    return " ".join(parts)
 
 def _coerce_int(v, default):
     try:
@@ -45,17 +71,40 @@ class UmnyeSetiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 session = async_create_clientsession(self.hass, verify_ssl=ui.get(CONF_VERIFY_SSL, True))
                 api = UmnyeSetiApi(session, verify_ssl=ui.get(CONF_VERIFY_SSL, True))
                 auth_resp = await api.auth(ui[CONF_LOGIN], ui[CONF_PASSWORD])
-            except Exception:
+            except Exception as exc:
+                _LOGGER.exception(
+                    "Umnye Seti config flow: unhandled authorization exception; login=%s; exception_type=%s",
+                    _mask_login(ui.get(CONF_LOGIN, "")),
+                    type(exc).__name__,
+                )
                 errors["base"] = "cannot_connect"
-                return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
+                placeholders = {"reason": f"{type(exc).__name__}: {exc}"}
+                return self.async_show_form(
+                    step_id="user",
+                    data_schema=schema,
+                    errors=errors,
+                    description_placeholders=placeholders,
+                )
 
-            if not auth_resp or (isinstance(auth_resp, dict) and auth_resp.get("error") in ("auth_failed", "unauthorized")):
-                errors["base"] = "auth_failed"
-                reason = (auth_resp or {}).get("message") if isinstance(auth_resp, dict) else ""
-                if not reason:
-                    reason = "Неверный логин или пароль"
+            if not auth_resp or (isinstance(auth_resp, dict) and auth_resp.get("error")):
+                error_code = auth_resp.get("error") if isinstance(auth_resp, dict) else "auth_failed"
+                fallback = (auth_resp or {}).get("message") if isinstance(auth_resp, dict) else ""
+                if not fallback:
+                    fallback = "Неверный логин или пароль"
+                reason = _config_error_reason(api, fallback)
+                errors["base"] = "cannot_connect" if error_code == "cannot_connect" else "auth_failed"
                 placeholders = {"reason": reason}
-                return self.async_show_form(step_id="user", data_schema=schema, errors=errors, description_placeholders=placeholders)
+                _LOGGER.error(
+                    "Umnye Seti config flow authorization failed; login=%s; %s",
+                    _mask_login(ui.get(CONF_LOGIN, "")),
+                    api.format_error_details(api.last_error_details) or f"code={error_code}; message={fallback}",
+                )
+                return self.async_show_form(
+                    step_id="user",
+                    data_schema=schema,
+                    errors=errors,
+                    description_placeholders=placeholders,
+                )
 
             await self.async_set_unique_id(f"login:{ui[CONF_LOGIN]}")
             self._abort_if_unique_id_configured()

@@ -99,7 +99,33 @@ class StatusSensor(BaseUmnyeSetiSensor):
     @property
     def extra_state_attributes(self):
         st = self.coordinator.data
-        return {"error": st.error if st else "no_state"}
+        if not st:
+            return {"error": "no_state"}
+
+        attrs = {
+            "error": st.error,
+            "last_attempt": st.last_attempt,
+        }
+        details = getattr(st, "error_details", None) or {}
+        for source, target in (
+            ("code", "error_code"),
+            ("stage", "error_stage"),
+            ("http_status", "http_status"),
+            ("url", "request_url"),
+            ("location", "redirect_location"),
+            ("content_type", "content_type"),
+            ("response_length", "response_length"),
+            ("message", "error_reason"),
+            ("exception_type", "exception_type"),
+            ("payload_keys", "payload_keys"),
+        ):
+            value = details.get(source)
+            if value not in (None, "", [], {}):
+                attrs[target] = value
+        redirects = details.get("redirects")
+        if redirects:
+            attrs["redirects"] = redirects
+        return attrs
 
 class SimpleValueSensor(BaseUmnyeSetiSensor):
     def __init__(self, coordinator: UmnyeSetiCoordinator, entry: ConfigEntry, key: str, field: str):

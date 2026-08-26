@@ -15,7 +15,7 @@
     },
     "error": {
       "auth_failed": "Authorization error: {reason}",
-      "cannot_connect": "Cannot connect to server."
+      "cannot_connect": "Cannot connect to server: {reason}"
     },
     "abort": {
       "already_configured": "This account is already configured."
@@ -83,6 +83,12 @@
       "last_update": {
         "name": "Last update"
       }
+    }
+  },
+  "issues": {
+    "connection_error": {
+      "title": "Smart Networks data update error",
+      "description": "The integration could not retrieve account data. The last successfully received values were preserved.\n\n{error}\n\nDetailed diagnostics are also written to the Home Assistant log (`custom_components.umnyeseti`)."
     }
   }
 }
