@@ -234,14 +234,7 @@ class TariffEndSensor(BaseUmnyeSetiSensor):
         return {"scheduled_end": t.get("end_subscribe")}
 
 class PaymentsSensor(BaseUmnyeSetiSensor):
-    """Payment history exposed as a normal HA sensor.
-
-    Older versions used the literal state "Открыть".  A SensorEntity cannot
-    execute an action when its state text is clicked, so the UI looked like a
-    broken button.  Keep the same unique_id, but expose a useful state and
-    scalar attributes that Home Assistant's standard more-info dialog renders
-    reliably.  The original ``pays`` list is kept for backwards compatibility.
-    """
+    """Payment history in a compact, human-readable Home Assistant view."""
 
     _MAX_VISIBLE_PAYMENTS = 30
 
@@ -261,16 +254,25 @@ class PaymentsSensor(BaseUmnyeSetiSensor):
         return f"{count} {word}"
 
     @staticmethod
-    def _format_payment(payment: dict) -> str:
-        date = payment.get("date") or "дата неизвестна"
-        amount = payment.get("amount")
+    def _format_amount(amount: Any) -> str:
+        """Format money without unnecessary .00 and with readable groups."""
         if amount is None:
-            return str(date)
+            return "—"
         try:
-            amount_text = f"{float(amount):.2f} ₽"
+            value = float(amount)
         except (TypeError, ValueError):
-            amount_text = f"{amount} ₽"
-        return f"{date} — {amount_text}"
+            return f"{amount} ₽"
+
+        if value.is_integer():
+            return f"{int(value):,} ₽".replace(",", " ")
+
+        text = f"{value:,.2f}".replace(",", " ").replace(".", ",")
+        return f"{text} ₽"
+
+    @classmethod
+    def _format_payment(cls, payment: dict) -> str:
+        date = payment.get("date") or "дата неизвестна"
+        return f"{date} — {cls._format_amount(payment.get('amount'))}"
 
     @property
     def native_value(self):
@@ -285,18 +287,23 @@ class PaymentsSensor(BaseUmnyeSetiSensor):
         if pays is None:
             return None
 
-        attrs: dict[str, Any] = {
-            "Количество платежей": len(pays),
-            # Compatibility with automations/templates that already use
-            # state_attr('sensor....', 'pays').
-            "pays": pays,
-        }
-
+        attrs: dict[str, Any] = {"Количество платежей": len(pays)}
         visible = pays[: self._MAX_VISIBLE_PAYMENTS]
+
         if visible:
             attrs["Последний платёж"] = self._format_payment(visible[0])
-            for index, payment in enumerate(visible, start=1):
-                attrs[f"Платёж {index}"] = self._format_payment(payment)
+
+            # Attribute names are rendered on the left and values on the right
+            # in Home Assistant's more-info dialog.  Use the payment date as
+            # the label so the history looks like a simple date / amount list.
+            for payment in visible:
+                date = str(payment.get("date") or "Дата неизвестна")
+                key = date
+                duplicate = 2
+                while key in attrs:
+                    key = f"{date} ({duplicate})"
+                    duplicate += 1
+                attrs[key] = self._format_amount(payment.get("amount"))
 
         if len(pays) > self._MAX_VISIBLE_PAYMENTS:
             attrs["Показано платежей"] = self._MAX_VISIBLE_PAYMENTS
