@@ -11,7 +11,6 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN, CONF_LOGIN
 from .coordinator import UmnyeSetiCoordinator
-from .payment import build_payment_url
 
 
 SENSOR_NAME = {
@@ -55,6 +54,20 @@ ICON = {
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, add_entities: AddEntitiesCallback):
     coordinator: UmnyeSetiCoordinator = hass.data[DOMAIN][entry.entry_id]
+
+    # v1.0.20 briefly exposed RAW HTTP diagnostics as a sensor. RAW capture is
+    # now always available through Home Assistant's standard "Download
+    # diagnostics" action, so remove the obsolete entity from the registry on
+    # upgrade instead of leaving an unavailable RAW sensor behind.
+    from homeassistant.helpers import entity_registry as er
+
+    login = entry.data.get(CONF_LOGIN)
+    raw_unique_id = f"umnyeseti_{login}_raw"
+    registry = er.async_get(hass)
+    raw_entity_id = registry.async_get_entity_id("sensor", DOMAIN, raw_unique_id)
+    if raw_entity_id:
+        registry.async_remove(raw_entity_id)
+
     entities: List[SensorEntity] = [
         StatusSensor(coordinator, entry),
         SimpleValueSensor(coordinator, entry, "account", "account"),
@@ -96,6 +109,16 @@ class BaseUmnyeSetiSensor(CoordinatorEntity[UmnyeSetiCoordinator], SensorEntity)
         if suffix in ('ip', 'mac', 'vlan'):
             self._attr_entity_category = EntityCategory.DIAGNOSTIC
 
+    def _payment_attributes(self) -> dict[str, Any]:
+        """Return the payment action first in every entity card."""
+        payment_url = self.coordinator.payment_bridge_url() or self.coordinator.payment_bridge_path()
+        return {"💳 Оплатить": payment_url} if payment_url else {}
+
+    @property
+    def extra_state_attributes(self):
+        # Keep the payment action visible at the top of every more-info card.
+        return self._payment_attributes() or None
+
     @property
     def device_info(self):
         login = self._entry.data.get(CONF_LOGIN)
@@ -106,7 +129,7 @@ class BaseUmnyeSetiSensor(CoordinatorEntity[UmnyeSetiCoordinator], SensorEntity)
             "model": "Личный кабинет абонента",
             "sw_version": getattr(self.coordinator, "_version", "0.0.0"),
             "suggested_area": "Internet",
-            "configuration_url": "https://stat.umnyeseti.ru",
+            "configuration_url": self.coordinator.payment_bridge_url() or "https://stat.umnyeseti.ru",
         }
 
 class StatusSensor(BaseUmnyeSetiSensor):
@@ -126,10 +149,11 @@ class StatusSensor(BaseUmnyeSetiSensor):
         if not st:
             return {"error": "no_state"}
 
-        attrs = {
+        attrs = self._payment_attributes()
+        attrs.update({
             "error": st.error,
             "last_attempt": st.last_attempt,
-        }
+        })
         details = getattr(st, "error_details", None) or {}
         for source, target in (
             ("code", "error_code"),
@@ -232,10 +256,8 @@ class TariffEndSensor(BaseUmnyeSetiSensor):
         if not st or not st.data:
             return None
         t = st.data.get("tariff") or {}
-        attrs = {"scheduled_end": t.get("end_subscribe")}
-        payment_url = build_payment_url(st.data.get("account"), t.get("pay_subscribe"))
-        if payment_url:
-            attrs["Оплатить"] = payment_url
+        attrs = self._payment_attributes()
+        attrs["scheduled_end"] = t.get("end_subscribe")
         return attrs
 
 class TariffPayLeftSensor(MoneyNestedSensor):
@@ -251,9 +273,7 @@ class TariffPayLeftSensor(MoneyNestedSensor):
         st = self.coordinator.data
         if not st or not st.data:
             return None
-        tariff = st.data.get("tariff") or {}
-        payment_url = build_payment_url(st.data.get("account"), tariff.get("pay_subscribe"))
-        return {"Оплатить": payment_url} if payment_url else None
+        return self._payment_attributes() or None
 
 class PaymentsSensor(BaseUmnyeSetiSensor):
     """Payment history in a compact, human-readable Home Assistant view."""
@@ -309,7 +329,8 @@ class PaymentsSensor(BaseUmnyeSetiSensor):
         if pays is None:
             return None
 
-        attrs: dict[str, Any] = {"Количество платежей": len(pays)}
+        attrs: dict[str, Any] = self._payment_attributes()
+        attrs["Количество платежей"] = len(pays)
         visible = pays[: self._MAX_VISIBLE_PAYMENTS]
 
         if visible:
@@ -329,15 +350,6 @@ class PaymentsSensor(BaseUmnyeSetiSensor):
 
         if len(pays) > self._MAX_VISIBLE_PAYMENTS:
             attrs["Показано платежей"] = self._MAX_VISIBLE_PAYMENTS
-
-        st = self.coordinator.data
-        tariff = (st.data.get("tariff") or {}) if st and st.data else {}
-        payment_url = build_payment_url(
-            st.data.get("account") if st and st.data else None,
-            tariff.get("pay_subscribe"),
-        )
-        if payment_url:
-            attrs["Оплатить"] = payment_url
 
         return attrs
 

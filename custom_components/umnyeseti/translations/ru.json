@@ -4,9 +4,9 @@
     "step": {
       "user": {
         "title": "Умные Сети",
-        "description": "Логин и пароль от https://stat.umnyeseti.ru",
+        "description": "Лицевой счёт и пароль от https://stat.umnyeseti.ru",
         "data": {
-          "login": "Логин",
+          "login": "Лицевой счёт",
           "password": "Пароль",
           "verify_ssl": "Проверять SSL-сертификаты",
           "update_interval": "Интервал обновления (мин)"

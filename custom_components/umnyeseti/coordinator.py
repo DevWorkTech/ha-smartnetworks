@@ -11,18 +11,21 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from homeassistant.util import dt as dt_util
+from homeassistant.helpers.network import get_url
 from homeassistant.helpers import issue_registry as ir
 
 from .api import UmnyeSetiApi
-from .payment import build_payment_url
+from .payment import build_payment_bridge_path
 from .const import (
     DOMAIN,
     DEFAULT_UPDATE_INTERVAL,
     MIN_UPDATE_INTERVAL,
+    DEFAULT_VERIFY_SSL,
     CONF_LOGIN,
     CONF_PASSWORD,
     CONF_VERIFY_SSL,
     CONF_UPDATE_INTERVAL,
+    CONF_PAYMENT_LINK_TOKEN,
     INIT_URL)
 
 _LOGGER = logging.getLogger(__name__)
@@ -40,8 +43,9 @@ class UmnyeSetiCoordinator(DataUpdateCoordinator[UmnyeSetiState]):
         self._version: str = str(config.get("version") or "0.0.0")
         self._login: str = config[CONF_LOGIN]
         self._password: str = config[CONF_PASSWORD]
-        self._verify_ssl: bool = config.get(CONF_VERIFY_SSL, True)
+        self._verify_ssl: bool = bool(config.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL))
         self._entry_id: str = config.get("entry_id", "default")
+        self._payment_link_token: str = str(config.get(CONF_PAYMENT_LINK_TOKEN) or "")
 
         interval_min = int(config.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL) or DEFAULT_UPDATE_INTERVAL)
         interval_min = max(interval_min, MIN_UPDATE_INTERVAL)
@@ -54,6 +58,10 @@ class UmnyeSetiCoordinator(DataUpdateCoordinator[UmnyeSetiState]):
             "notified_threshold": None,
             "persistent_sent": False,
             "mobile_services": [],
+            "pending_threshold": None,
+            # If the user successfully reached the external payment gateway,
+            # suppress re-creating the same warning while end_days is unchanged.
+            "payment_dismissed_days": None,
         }
 
         session: ClientSession = async_create_clientsession(hass, verify_ssl=self._verify_ssl)
@@ -128,9 +136,11 @@ class UmnyeSetiCoordinator(DataUpdateCoordinator[UmnyeSetiState]):
             services = data.get("mobile_services")
             self._tariff_notification_state = {
                 "last_days": int(last_days) if isinstance(last_days, int) else None,
-                "notified_threshold": int(threshold) if threshold in (1, 3, 5) else None,
+                "notified_threshold": int(threshold) if isinstance(threshold, int) and -3 <= threshold <= 5 else None,
                 "persistent_sent": bool(data.get("persistent_sent", False)),
                 "mobile_services": [str(x) for x in services if isinstance(x, str)] if isinstance(services, list) else [],
+                "pending_threshold": int(data.get("pending_threshold")) if data.get("pending_threshold") in (5, 3, 1, 0, -1, -2, -3) else None,
+                "payment_dismissed_days": int(data.get("payment_dismissed_days")) if isinstance(data.get("payment_dismissed_days"), int) else None,
             }
             _LOGGER.debug(
                 "%s: tariff notification state loaded: last_days=%s; threshold=%s; mobile_services=%s",
@@ -152,6 +162,8 @@ class UmnyeSetiCoordinator(DataUpdateCoordinator[UmnyeSetiState]):
                 "notified_threshold": self._tariff_notification_state.get("notified_threshold"),
                 "persistent_sent": bool(self._tariff_notification_state.get("persistent_sent", False)),
                 "mobile_services": sorted(set(self._tariff_notification_state.get("mobile_services") or [])),
+                "pending_threshold": self._tariff_notification_state.get("pending_threshold"),
+                "payment_dismissed_days": self._tariff_notification_state.get("payment_dismissed_days"),
             }
 
             def _write():
@@ -164,6 +176,39 @@ class UmnyeSetiCoordinator(DataUpdateCoordinator[UmnyeSetiState]):
                 "%s: failed to save tariff notification state: exception_type=%s; exception=%s; path=%s",
                 DOMAIN, type(e).__name__, e, self._notification_state_path
             )
+
+    def payment_bridge_path(self) -> str | None:
+        """Return the token-protected local bridge path."""
+        return build_payment_bridge_path(self._entry_id, self._payment_link_token)
+
+    def payment_bridge_url(self) -> str | None:
+        """Return an absolute HA bridge URL suitable for device configuration_url."""
+        path = self.payment_bridge_path()
+        if not path:
+            return None
+        try:
+            base = get_url(
+                self.hass,
+                allow_internal=True,
+                allow_external=True,
+                allow_cloud=True,
+                prefer_external=True,
+            )
+        except Exception as exc:
+            _LOGGER.debug(
+                "%s: cannot build absolute payment bridge URL: exception_type=%s; exception=%s",
+                DOMAIN,
+                type(exc).__name__,
+                exc,
+            )
+            return None
+        return f"{str(base).rstrip('/')}{path}"
+
+    @staticmethod
+    def _notification_window_open(now=None) -> bool:
+        """Notifications may be sent only from 07:00 inclusive to 22:00 exclusive."""
+        current = now or dt_util.now()
+        return 7 <= int(current.hour) < 22
 
     def _tariff_notification_tag(self) -> str:
         return f"umnyeseti_tariff_{self._entry_id}"[:64]
@@ -204,25 +249,42 @@ class UmnyeSetiCoordinator(DataUpdateCoordinator[UmnyeSetiState]):
             text = text.split(",", 1)[0].strip()
         return text or None
 
+    @staticmethod
+    def _ru_days_word(days: int) -> str:
+        n = abs(int(days))
+        last = n % 10
+        last2 = n % 100
+        if last == 1 and last2 != 11:
+            return "день"
+        if 2 <= last <= 4 and not 12 <= last2 <= 14:
+            return "дня"
+        return "дней"
+
     def _tariff_notification_text(self, mapped: dict, days: int) -> tuple[str, str]:
         ru = self._lang().startswith("ru")
         tariff = mapped.get("tariff") or {}
-        name = tariff.get("name") or ("тариф" if ru else "plan")
         end_date = self._notification_end_date(tariff.get("end_subscribe"))
         balance = self._money_text(mapped.get("balance"))
         pay_left = self._money_text(tariff.get("pay_subscribe"))
         account = mapped.get("account")
 
         if ru:
-            if days == 1:
-                title = "⚠️ Умные Сети: тариф закончится завтра"
-                intro = "До окончания оплаченного тарифа остался 1 день."
-            elif days == 3:
-                title = "⚠️ Умные Сети: до окончания тарифа 3 дня"
-                intro = "До окончания оплаченного тарифа осталось 3 дня."
+            if days > 0:
+                word = self._ru_days_word(days)
+                if days == 1:
+                    title = "⚠️ Умные Сети: тариф закончится завтра"
+                    intro = "До окончания оплаченного тарифа остался 1 день."
+                else:
+                    title = f"⚠️ Умные Сети: до окончания тарифа {days} {word}"
+                    intro = f"До окончания оплаченного тарифа осталось {days} {word}."
+            elif days == 0:
+                title = "⚠️ Умные Сети: тариф заканчивается сегодня"
+                intro = "Оплаченный тариф заканчивается сегодня."
             else:
-                title = "⚠️ Умные Сети: до окончания тарифа 5 дней"
-                intro = "До окончания оплаченного тарифа осталось 5 дней."
+                overdue = abs(days)
+                word = self._ru_days_word(overdue)
+                title = f"⚠️ Умные Сети: тариф просрочен на {overdue} {word}"
+                intro = f"Оплаченный тариф просрочен на {overdue} {word}."
 
             lines = [intro]
             if end_date:
@@ -235,12 +297,21 @@ class UmnyeSetiCoordinator(DataUpdateCoordinator[UmnyeSetiState]):
                 lines.append(f"К оплате для продления: {pay_left}")
             return title, "\n".join(lines)
 
-        if days == 1:
-            title = "⚠️ Smart Networks: plan expires tomorrow"
-            intro = f"Your paid plan “{name}” expires tomorrow."
+        if days > 0:
+            if days == 1:
+                title = "⚠️ Smart Networks: plan expires tomorrow"
+                intro = "Your paid plan expires tomorrow."
+            else:
+                title = f"⚠️ Smart Networks: plan expires in {days} days"
+                intro = f"Your paid plan expires in {days} days."
+        elif days == 0:
+            title = "⚠️ Smart Networks: plan expires today"
+            intro = "Your paid plan expires today."
         else:
-            title = f"⚠️ Smart Networks: plan expires in {days} days"
-            intro = f"Your paid plan “{name}” expires in {days} days."
+            overdue = abs(days)
+            unit = "day" if overdue == 1 else "days"
+            title = f"⚠️ Smart Networks: plan overdue by {overdue} {unit}"
+            intro = f"Your paid plan is overdue by {overdue} {unit}."
 
         lines = [intro]
         if end_date:
@@ -262,7 +333,7 @@ class UmnyeSetiCoordinator(DataUpdateCoordinator[UmnyeSetiState]):
                 label = "Оплатить" if self._lang().startswith("ru") else "Pay now"
                 # persistent_notification supports Markdown links. A heading makes
                 # the payment action prominent in the Home Assistant notification panel.
-                persistent_message = f"{message}\n\n### [💳 {label}]({payment_url})"
+                persistent_message = f"### [💳 {label}]({payment_url})\n\n{message}"
 
             await self.hass.services.async_call(
                 "persistent_notification",
@@ -360,7 +431,35 @@ class UmnyeSetiCoordinator(DataUpdateCoordinator[UmnyeSetiState]):
         self._tariff_notification_state["notified_threshold"] = None
         self._tariff_notification_state["persistent_sent"] = False
         self._tariff_notification_state["mobile_services"] = []
+        self._tariff_notification_state["pending_threshold"] = None
         _LOGGER.info("%s: tariff expiration notifications cleared: reason=%s", DOMAIN, reason)
+
+    async def async_payment_gateway_opened(self) -> None:
+        """Dismiss active payment reminders after a confirmed gateway handoff.
+
+        The dismissal is persisted for the currently reported end_days value so
+        the same warning is not recreated by the next coordinator refresh. If
+        end_days later changes, the normal threshold logic becomes active again.
+        """
+        days = None
+        state = getattr(self, "data", None)
+        mapped = getattr(state, "data", None) if state is not None else None
+        if isinstance(mapped, dict):
+            try:
+                raw_days = (mapped.get("tariff") or {}).get("end_days")
+                if raw_days is not None:
+                    days = int(raw_days)
+            except (TypeError, ValueError):
+                days = None
+
+        await self._async_clear_tariff_notifications("payment gateway opened successfully")
+        self._tariff_notification_state["payment_dismissed_days"] = days
+        await self._save_notification_state()
+        _LOGGER.info(
+            "%s: payment reminder dismissed after gateway handoff: end_days=%s",
+            DOMAIN,
+            days,
+        )
 
     async def _async_handle_tariff_notifications(self, mapped: dict) -> None:
         tariff = mapped.get("tariff") or {}
@@ -374,15 +473,71 @@ class UmnyeSetiCoordinator(DataUpdateCoordinator[UmnyeSetiState]):
             _LOGGER.warning("%s: cannot process tariff notification: invalid end_days=%r", DOMAIN, days_raw)
             return
 
+        thresholds = (5, 3, 1, 0, -1, -2, -3)
         old_days = self._tariff_notification_state.get("last_days")
         active_threshold = self._tariff_notification_state.get("notified_threshold")
+        dismissed_days = self._tariff_notification_state.get("payment_dismissed_days")
         state_changed = False
 
-        # A larger remaining-days value means the provider extended/renewed the
-        # paid period. Any previously shown warning is stale and must disappear
-        # from both Home Assistant and the phones. Do not immediately create a
-        # new threshold warning in the same refresh; the extension itself is the
-        # reason the old alert is being cleared.
+        # Payment reminders are meaningful only while the account actually lacks
+        # money for the next tariff charge. ``pay_subscribe`` is calculated by
+        # the mapper as max(tariff_amount - balance, 0), so a positive value is
+        # the single source of truth for "payment is still required".
+        try:
+            pay_left_raw = tariff.get("pay_subscribe")
+            pay_left = float(pay_left_raw) if pay_left_raw is not None else None
+        except (TypeError, ValueError):
+            pay_left = None
+
+        if pay_left is None or pay_left <= 0:
+            has_visible_warning = (
+                active_threshold is not None
+                or self._tariff_notification_state.get("persistent_sent")
+                or self._tariff_notification_state.get("mobile_services")
+            )
+            if has_visible_warning:
+                await self._async_clear_tariff_notifications(
+                    "payment reminder no longer needed: balance is sufficient"
+                    if pay_left is not None
+                    else "payment reminder suppressed: required payment amount is unavailable"
+                )
+                state_changed = True
+
+            if self._tariff_notification_state.get("pending_threshold") is not None:
+                self._tariff_notification_state["pending_threshold"] = None
+                state_changed = True
+            if self._tariff_notification_state.get("payment_dismissed_days") is not None:
+                self._tariff_notification_state["payment_dismissed_days"] = None
+                state_changed = True
+            if days != old_days:
+                self._tariff_notification_state["last_days"] = days
+                state_changed = True
+
+            if state_changed:
+                await self._save_notification_state()
+            _LOGGER.debug(
+                "%s: tariff payment reminder suppressed: days=%s; pay_subscribe=%r",
+                DOMAIN,
+                days,
+                pay_left_raw,
+            )
+            return
+
+        # A successful bridge -> payment gateway handoff dismisses the current
+        # warning. Do not recreate it every refresh while the provider still
+        # reports the same end_days value. A later day change re-enables the
+        # normal threshold schedule (for example 3 days -> 1 day).
+        if isinstance(dismissed_days, int):
+            if days == dismissed_days:
+                if days != old_days:
+                    self._tariff_notification_state["last_days"] = days
+                    await self._save_notification_state()
+                return
+            self._tariff_notification_state["payment_dismissed_days"] = None
+            state_changed = True
+
+        # Renewal/extension: remove all stale warnings immediately, even during
+        # quiet hours. Clearing is not a new notification.
         if isinstance(old_days, int) and days > old_days:
             if (
                 active_threshold is not None
@@ -394,6 +549,7 @@ class UmnyeSetiCoordinator(DataUpdateCoordinator[UmnyeSetiState]):
                 )
                 state_changed = True
             self._tariff_notification_state["last_days"] = days
+            self._tariff_notification_state["pending_threshold"] = None
             await self._save_notification_state()
             return
 
@@ -401,26 +557,84 @@ class UmnyeSetiCoordinator(DataUpdateCoordinator[UmnyeSetiState]):
             self._tariff_notification_state["last_days"] = days
             state_changed = True
 
-        if days not in (5, 3, 1):
+        # After the third overdue day there must be no lingering warning.
+        if days < -3:
+            if (
+                active_threshold is not None
+                or self._tariff_notification_state.get("persistent_sent")
+                or self._tariff_notification_state.get("mobile_services")
+            ):
+                await self._async_clear_tariff_notifications(
+                    f"overdue notification window finished at {days} days"
+                )
+                state_changed = True
+            self._tariff_notification_state["pending_threshold"] = None
             if state_changed:
                 await self._save_notification_state()
             return
 
-        title, message = self._tariff_notification_text(mapped, days)
-        payment_url = build_payment_url(mapped.get("account"), tariff.get("pay_subscribe"))
+        pending_threshold = self._tariff_notification_state.get("pending_threshold")
 
-        # Reusing one notification_id/tag means 3 days replaces 5 days, and
-        # tomorrow replaces 3 days instead of leaving several stale warnings.
-        threshold_changed = active_threshold != days
+        # Strict quiet hours: never send before 07:00 or at/after 22:00 in
+        # Home Assistant's configured local timezone. A threshold reached at
+        # night is kept pending across day changes so it cannot be lost.
+        if days in thresholds and not self._notification_window_open():
+            # Queue only a threshold that has not been delivered yet. If this
+            # same threshold was already sent earlier in the day, quiet hours
+            # must not turn it into a duplicate morning notification.
+            already_delivered = (
+                active_threshold == days
+                and (
+                    self._tariff_notification_state.get("persistent_sent")
+                    or self._tariff_notification_state.get("mobile_services")
+                )
+            )
+            if not already_delivered and pending_threshold != days:
+                self._tariff_notification_state["pending_threshold"] = days
+                state_changed = True
+            if state_changed:
+                await self._save_notification_state()
+            _LOGGER.debug(
+                "%s: tariff notification delayed by quiet hours: days=%s; allowed=07:00-22:00; already_delivered=%s",
+                DOMAIN,
+                days,
+                already_delivered,
+            )
+            return
+
+        if days not in thresholds:
+            if pending_threshold is None:
+                if state_changed:
+                    await self._save_notification_state()
+                return
+            if not self._notification_window_open():
+                if state_changed:
+                    await self._save_notification_state()
+                return
+            # If the integer day counter changed while the notification was
+            # sleeping, describe the current state instead of showing stale
+            # wording (e.g. 4 days rather than a queued 5-day message).
+            notification_days = days if -3 <= days <= 5 else pending_threshold
+        else:
+            notification_days = days
+
+        title, message = self._tariff_notification_text(mapped, notification_days)
+        payment_url = self.payment_bridge_url()
+        persistent_payment_url = payment_url
+
+        threshold_changed = active_threshold != notification_days
         if threshold_changed:
-            self._tariff_notification_state["notified_threshold"] = days
+            self._tariff_notification_state["notified_threshold"] = notification_days
             self._tariff_notification_state["persistent_sent"] = False
             self._tariff_notification_state["mobile_services"] = []
             active_threshold = days
             state_changed = True
+        if self._tariff_notification_state.get("pending_threshold") is not None:
+            self._tariff_notification_state["pending_threshold"] = None
+            state_changed = True
 
         if not self._tariff_notification_state.get("persistent_sent", False):
-            if await self._async_create_persistent_tariff_notification(title, message, payment_url):
+            if await self._async_create_persistent_tariff_notification(title, message, persistent_payment_url):
                 self._tariff_notification_state["persistent_sent"] = True
                 state_changed = True
                 _LOGGER.info(
@@ -430,17 +644,16 @@ class UmnyeSetiCoordinator(DataUpdateCoordinator[UmnyeSetiState]):
 
         notified_services = set(self._tariff_notification_state.get("mobile_services") or [])
         mobile_services = self._mobile_notify_services()
-        missing_services = [service for service in mobile_services if service not in notified_services]
-
         if not mobile_services:
-            if threshold_changed:
-                _LOGGER.warning(
-                    "%s: tariff warning is active for %s day(s), but no notify.mobile_app_* services are registered; "
-                    "the Home Assistant persistent notification is still available",
+            if not notified_services:
+                _LOGGER.debug(
+                    "%s: tariff warning is active for %s day(s), but no notify.mobile_app_* services are registered",
                     DOMAIN, days
                 )
         else:
-            for service in missing_services:
+            for service in mobile_services:
+                if service in notified_services:
+                    continue
                 if await self._async_send_mobile_tariff_notification(service, title, message, payment_url):
                     notified_services.add(service)
                     state_changed = True
@@ -452,22 +665,6 @@ class UmnyeSetiCoordinator(DataUpdateCoordinator[UmnyeSetiState]):
         self._tariff_notification_state["mobile_services"] = sorted(notified_services)
         if state_changed:
             await self._save_notification_state()
-
-    def _raise_issue(self, message: str):
-        try:
-            ir.async_create_issue(
-                self.hass, DOMAIN, f"error_{self._entry_id}",
-                is_fixable=False, severity=ir.IssueSeverity.ERROR,
-                translation_key="connection_error",
-                translation_placeholders={"error": message})
-        except Exception:
-            _LOGGER.exception("%s: failed to create Home Assistant repair issue", DOMAIN)
-
-    def _clear_issue(self):
-        try:
-            ir.async_delete_issue(self.hass, DOMAIN, f"error_{self._entry_id}")
-        except Exception:
-            _LOGGER.exception("%s: failed to clear Home Assistant repair issue", DOMAIN)
 
     def _lang(self) -> str:
         lang = getattr(self.hass.config, "language", None) or "en"
@@ -533,6 +730,30 @@ class UmnyeSetiCoordinator(DataUpdateCoordinator[UmnyeSetiState]):
             return (d2 - d1).days
         except Exception:
             return None
+
+    def _raise_issue(self, message: str):
+        """Create or update the Home Assistant Repairs issue for this entry."""
+        try:
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                f"error_{self._entry_id}",
+                is_fixable=False,
+                severity=ir.IssueSeverity.ERROR,
+                translation_key="connection_error",
+                translation_placeholders={"error": message},
+            )
+        except Exception:
+            # A Repairs problem must never break the data refresh itself.
+            _LOGGER.exception("%s: failed to create Home Assistant repair issue", DOMAIN)
+
+    def _clear_issue(self):
+        """Remove the Home Assistant Repairs issue after a successful refresh."""
+        try:
+            ir.async_delete_issue(self.hass, DOMAIN, f"error_{self._entry_id}")
+        except Exception:
+            # A Repairs problem must never turn a successful refresh into failure.
+            _LOGGER.exception("%s: failed to clear Home Assistant repair issue", DOMAIN)
 
     def _issue_details_text(self, details: dict) -> str:
         ru = self._lang().startswith("ru")

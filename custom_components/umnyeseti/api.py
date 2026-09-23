@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import html as html_lib
 import json as _json
 import logging
 import re
 from html.parser import HTMLParser
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote_plus, urljoin, urlparse
@@ -77,7 +79,7 @@ class UmnyeSetiApi:
         self,
         session: ClientSession,
         *,
-        verify_ssl: bool = True,
+        verify_ssl: bool = False,
         on_cookies=None,
         version: str = "0.0.0",
     ):
@@ -88,6 +90,7 @@ class UmnyeSetiApi:
         self._last_error_details: dict[str, Any] = {}
         self._on_cookies = on_cookies
         self._sensitive_values: set[str] = set()
+        self._raw_debug: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     def _read_version_from_manifest() -> str:
@@ -105,6 +108,16 @@ class UmnyeSetiApi:
     @property
     def last_error_details(self) -> dict[str, Any]:
         return dict(self._last_error_details)
+
+    @property
+    def raw_debug(self) -> dict[str, dict[str, Any]]:
+        """Last sanitized RAW HTTP request/response per API stage.
+
+        RAW capture is always enabled. Authentication secrets, cookies and CSRF
+        tokens are masked, while provider payload data remains available for
+        troubleshooting from Home Assistant.
+        """
+        return copy.deepcopy(self._raw_debug)
 
     @property
     def user_agent(self) -> str:
@@ -225,6 +238,110 @@ class UmnyeSetiApi:
         snippet = html_lib.unescape(snippet)
         snippet = re.sub(r"\s+", " ", snippet).strip()
         return snippet[:MAX_RESPONSE_SNIPPET]
+
+    @staticmethod
+    def _sanitize_raw_headers(headers: Any) -> dict[str, str]:
+        out: dict[str, str] = {}
+        try:
+            items = headers.items()
+        except Exception:
+            return out
+        for key, value in items:
+            name = str(key)
+            low = name.lower()
+            if low in {"authorization", "cookie", "set-cookie", "x-csrf-token", "x-xsrf-token"}:
+                out[name] = "[redacted]"
+            else:
+                out[name] = str(value)
+        return out
+
+    @classmethod
+    def _sanitize_raw_value(cls, value: Any, key: str = "") -> Any:
+        low = str(key).lower()
+        secret_markers = ("password", "passwd", "token", "secret", "cookie", "authorization", "authenticity", "csrf", "xsrf")
+        if any(marker in low for marker in secret_markers):
+            return "[redacted]"
+        if isinstance(value, dict):
+            return {str(k): cls._sanitize_raw_value(v, str(k)) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [cls._sanitize_raw_value(v) for v in value]
+        return value
+
+    @staticmethod
+    def _sanitize_raw_text(text: str) -> str:
+        """Mask authentication secrets without flattening the RAW body."""
+        if not text:
+            return ""
+        result = str(text)
+        patterns = (
+            (r'(?is)(name=["\'](?:authenticity_token|csrf-token|csrf_token|user\[password\]|password)["\'][^>]*?(?:value|content)=["\'])[^"\']+', r"\1[redacted]"),
+            (r'(?is)((?:value|content)=["\'])[^"\']+(["\'][^>]*?name=["\'](?:authenticity_token|csrf-token|csrf_token|user\[password\]|password)["\'])', r"\1[redacted]\2"),
+            (r'(?i)("?(?:user\[password\]|password|token|secret|authorization|cookie|authenticity_token|csrf_token|csrf-token)"?\s*[:=]\s*["\']?)[^"\'&,\s<]+', r"\1[redacted]"),
+        )
+        for pattern, repl in patterns:
+            result = re.sub(pattern, repl, result)
+        return result
+
+    def record_raw_http(
+        self,
+        stage: str,
+        *,
+        method: str,
+        url: str,
+        request_headers: Optional[dict[str, Any]] = None,
+        request_body: Any = None,
+        resp: Optional[ClientResponse] = None,
+        response_text: str = "",
+        exc: Optional[BaseException] = None,
+    ) -> None:
+        """Expose sanitized RAW capture for auxiliary integration HTTP flows."""
+        self._record_raw(
+            stage,
+            method=method,
+            url=url,
+            request_headers=request_headers,
+            request_body=request_body,
+            resp=resp,
+            response_text=response_text,
+            exc=exc,
+        )
+
+    def _record_raw(
+        self,
+        stage: str,
+        *,
+        method: str,
+        url: str,
+        request_headers: Optional[dict[str, Any]] = None,
+        request_body: Any = None,
+        resp: Optional[ClientResponse] = None,
+        response_text: str = "",
+        exc: Optional[BaseException] = None,
+    ) -> None:
+        record: dict[str, Any] = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "request": {
+                "method": str(method).upper(),
+                "url": str(url),
+                "headers": self._sanitize_raw_headers(request_headers or {}),
+            },
+        }
+        if request_body is not None:
+            record["request"]["body"] = self._sanitize_raw_value(request_body)
+        if resp is not None:
+            record["response"] = {
+                "status": int(resp.status),
+                "url": str(resp.url),
+                "headers": self._sanitize_raw_headers(resp.headers),
+                "redirects": self._redirect_chain(resp),
+                "body": self._sanitize_raw_text(response_text),
+            }
+        elif exc is not None:
+            record["response"] = {
+                "exception_type": type(exc).__name__,
+                "exception": str(exc) or type(exc).__name__,
+            }
+        self._raw_debug[str(stage)] = record
 
     @staticmethod
     def _response_meta(resp: ClientResponse, text: str) -> dict[str, Any]:
@@ -501,15 +618,20 @@ class UmnyeSetiApi:
 
         try:
             _LOGGER.debug("Umnye Seti auth stage=auth.init: GET %s", INIT_URL)
+            init_headers = self._headers_html()
             try:
                 async with self._session.get(
                     INIT_URL,
-                    headers=self._headers_html(),
+                    headers=init_headers,
                     ssl=self._verify_ssl,
                     timeout=DEFAULT_TIMEOUT,
                 ) as resp:
                     html = await resp.text(errors="replace")
                     self._trace_response("auth.init", resp, html)
+                    self._record_raw(
+                        "auth.init", method="GET", url=INIT_URL,
+                        request_headers=init_headers, resp=resp, response_text=html
+                    )
 
                     if resp.status >= 400:
                         self._set_error(
@@ -537,6 +659,7 @@ class UmnyeSetiApi:
                         )
                         return {"error": "auth_failed", "message": "Не найден CSRF/authenticity token формы входа"}
             except (asyncio.TimeoutError, ClientError) as exc:
+                self._record_raw("auth.init", method="GET", url=INIT_URL, request_headers=init_headers, exc=exc)
                 self._set_error(
                     "auth_init_network_error",
                     "auth.init",
@@ -545,6 +668,7 @@ class UmnyeSetiApi:
                 )
                 return {"error": "cannot_connect", "message": str(exc) or type(exc).__name__}
             except Exception as exc:
+                self._record_raw("auth.init", method="GET", url=INIT_URL, request_headers=init_headers, exc=exc)
                 self._set_error(
                     "auth_init_exception",
                     "auth.init",
@@ -591,13 +715,14 @@ class UmnyeSetiApi:
                 "form/meta",
             )
 
+            auth_headers = self._headers_form(init_url, str(token))
             try:
                 # Do not auto-follow here: the first Location is useful to
                 # distinguish a normal successful browser redirect from a bounce
                 # back to /login.
                 async with self._session.post(
                     auth_url,
-                    headers=self._headers_form(init_url, str(token)),
+                    headers=auth_headers,
                     ssl=self._verify_ssl,
                     data=form,
                     timeout=DEFAULT_TIMEOUT,
@@ -605,6 +730,11 @@ class UmnyeSetiApi:
                 ) as resp:
                     text = await resp.text(errors="replace")
                     self._trace_response("auth.submit", resp, text)
+                    self._record_raw(
+                        "auth.submit", method="POST", url=auth_url,
+                        request_headers=auth_headers, request_body=form,
+                        resp=resp, response_text=text
+                    )
                     await self._persist()
 
                     if resp.status in (401, 403, 422):
@@ -688,6 +818,10 @@ class UmnyeSetiApi:
                     )
                     return await self._verify_auth()
             except (asyncio.TimeoutError, ClientError) as exc:
+                self._record_raw(
+                    "auth.submit", method="POST", url=auth_url,
+                    request_headers=auth_headers, request_body=form, exc=exc
+                )
                 self._set_error(
                     "auth_submit_network_error",
                     "auth.submit",
@@ -696,6 +830,10 @@ class UmnyeSetiApi:
                 )
                 return {"error": "cannot_connect", "message": str(exc) or type(exc).__name__}
             except Exception as exc:
+                self._record_raw(
+                    "auth.submit", method="POST", url=auth_url,
+                    request_headers=auth_headers, request_body=form, exc=exc
+                )
                 self._set_error(
                     "auth_submit_exception",
                     "auth.submit",
@@ -719,15 +857,20 @@ class UmnyeSetiApi:
             self._clear_error()
 
         _LOGGER.debug("Umnye Seti stage=%s: GET %s", stage, INIT_URL)
+        request_headers = self._headers_json()
         try:
             async with self._session.get(
                 INIT_URL,
-                headers=self._headers_json(),
+                headers=request_headers,
                 ssl=self._verify_ssl,
                 timeout=DEFAULT_TIMEOUT,
             ) as resp:
                 text = await resp.text(errors="replace")
                 self._trace_response(stage, resp, text)
+                self._record_raw(
+                    stage, method="GET", url=INIT_URL,
+                    request_headers=request_headers, resp=resp, response_text=text
+                )
                 await self._persist()
 
                 if resp.status in (401, 403) or self._looks_like_login_page(resp, text):
@@ -788,6 +931,7 @@ class UmnyeSetiApi:
                 self._clear_error()
                 return payload
         except (asyncio.TimeoutError, ClientError) as exc:
+            self._record_raw(stage, method="GET", url=INIT_URL, request_headers=request_headers, exc=exc)
             self._set_error(
                 "fetch_network_error",
                 stage,
@@ -796,6 +940,7 @@ class UmnyeSetiApi:
             )
             return {"error": "cannot_connect", "message": str(exc) or type(exc).__name__}
         except Exception as exc:
+            self._record_raw(stage, method="GET", url=INIT_URL, request_headers=request_headers, exc=exc)
             self._set_error(
                 "fetch_exception",
                 stage,

@@ -4,9 +4,9 @@
     "step": {
       "user": {
         "title": "Smart Networks",
-        "description": "Login and password from https://stat.umnyeseti.ru",
+        "description": "Account number and password from https://stat.umnyeseti.ru",
         "data": {
-          "login": "Login",
+          "login": "Account number",
           "password": "Password",
           "verify_ssl": "Verify SSL certificates",
           "update_interval": "Update interval (min)"

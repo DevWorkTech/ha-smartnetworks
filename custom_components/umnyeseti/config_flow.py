@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import secrets
 
 import voluptuous as vol
 from homeassistant import config_entries
@@ -12,8 +13,10 @@ from .const import (
     CONF_PASSWORD,
     CONF_VERIFY_SSL,
     CONF_UPDATE_INTERVAL,
+    CONF_PAYMENT_LINK_TOKEN,
     DEFAULT_UPDATE_INTERVAL,
     MIN_UPDATE_INTERVAL,
+    DEFAULT_VERIFY_SSL,
 )
 from .api import UmnyeSetiApi
 
@@ -59,7 +62,7 @@ class UmnyeSetiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         schema = vol.Schema({
             vol.Required(CONF_LOGIN): str,
             vol.Required(CONF_PASSWORD): str,
-            vol.Optional(CONF_VERIFY_SSL, default=True): bool,
+            vol.Optional(CONF_VERIFY_SSL, default=DEFAULT_VERIFY_SSL): bool,
             vol.Optional(CONF_UPDATE_INTERVAL, default=DEFAULT_UPDATE_INTERVAL): vol.All(int, vol.Range(min=MIN_UPDATE_INTERVAL)),
         })
 
@@ -68,8 +71,8 @@ class UmnyeSetiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ui[CONF_UPDATE_INTERVAL] = max(_coerce_int(ui.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL), DEFAULT_UPDATE_INTERVAL), MIN_UPDATE_INTERVAL)
 
             try:
-                session = async_create_clientsession(self.hass, verify_ssl=ui.get(CONF_VERIFY_SSL, True))
-                api = UmnyeSetiApi(session, verify_ssl=ui.get(CONF_VERIFY_SSL, True))
+                session = async_create_clientsession(self.hass, verify_ssl=ui.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL))
+                api = UmnyeSetiApi(session, verify_ssl=ui.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL))
                 auth_resp = await api.auth(ui[CONF_LOGIN], ui[CONF_PASSWORD])
             except Exception as exc:
                 _LOGGER.exception(
@@ -106,6 +109,7 @@ class UmnyeSetiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     description_placeholders=placeholders,
                 )
 
+            ui[CONF_PAYMENT_LINK_TOKEN] = secrets.token_urlsafe(32)
             await self.async_set_unique_id(f"login:{ui[CONF_LOGIN]}")
             self._abort_if_unique_id_configured()
             return self.async_create_entry(title=f"Умные Сети ({ui[CONF_LOGIN]})", data=ui)
@@ -121,14 +125,23 @@ class UmnyeSetiOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
     async def async_step_init(self, user_input=None):
         if user_input is not None:
             ui = dict(user_input)
-            current = self.config_entry.options.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)
+            current = self.config_entry.options.get(
+                CONF_UPDATE_INTERVAL,
+                self.config_entry.data.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL),
+            )
             ui[CONF_UPDATE_INTERVAL] = max(_coerce_int(ui.get(CONF_UPDATE_INTERVAL, current), current), MIN_UPDATE_INTERVAL)
-            ui[CONF_VERIFY_SSL] = bool(ui.get(CONF_VERIFY_SSL, self.config_entry.options.get(CONF_VERIFY_SSL, True)))
+            ui[CONF_VERIFY_SSL] = bool(ui.get(CONF_VERIFY_SSL, self.config_entry.options.get(CONF_VERIFY_SSL, self.config_entry.data.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL))))
             return self.async_create_entry(title="Options", data=ui)
 
         opts = self.config_entry.options or {}
         schema = vol.Schema({
-            vol.Optional(CONF_UPDATE_INTERVAL, default=_coerce_int(opts.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL), DEFAULT_UPDATE_INTERVAL)): vol.All(int, vol.Range(min=MIN_UPDATE_INTERVAL)),
-            vol.Optional(CONF_VERIFY_SSL, default=bool(opts.get(CONF_VERIFY_SSL, True))): bool,
+            vol.Optional(CONF_UPDATE_INTERVAL, default=_coerce_int(
+                opts.get(
+                    CONF_UPDATE_INTERVAL,
+                    self.config_entry.data.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL),
+                ),
+                DEFAULT_UPDATE_INTERVAL,
+            )): vol.All(int, vol.Range(min=MIN_UPDATE_INTERVAL)),
+            vol.Optional(CONF_VERIFY_SSL, default=bool(opts.get(CONF_VERIFY_SSL, self.config_entry.data.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL)))): bool,
         })
         return self.async_show_form(step_id="init", data_schema=schema)
