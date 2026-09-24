@@ -118,3 +118,5 @@ RAW-данные запросов и ответов сохраняются ав�
 ![Умные Сети в Home Assistant](screenshot1.png)
 
 ![Сенсоры Умные Сети](screenshot2.png)
+
+![Оплата Умные Сети](screenshot3.png)

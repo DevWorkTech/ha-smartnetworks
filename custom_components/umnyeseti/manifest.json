@@ -1,7 +1,7 @@
 {
   "domain": "umnyeseti",
   "name": "Умные Сети (Smart Networks)",
-  "version": "1.0.34",
+  "version": "1.0.35",
   "documentation": "https://github.com/DevWorkTech/ha-smartnetworks",
   "issue_tracker": "https://github.com/DevWorkTech/ha-smartnetworks/issues",
   "codeowners": [
