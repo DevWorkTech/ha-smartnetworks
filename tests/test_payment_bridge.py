@@ -73,6 +73,7 @@ class Entries:
 class State:
     data = {
         "account": "00123456",
+        "subscriber": "Иванов Иван Иванович",
         "tariff": {"pay_subscribe": 1, "end_days": 3},
     }
 
@@ -157,6 +158,10 @@ class PaymentBridgeTests(unittest.IsolatedAsyncioTestCase):
         text = response.text
         self.assertEqual(response.status, 200)
         self.assertIn('value="00123456" disabled', text)
+        self.assertIn('id="subscriber" class="subscriber-input" value="Иванов Иван Иванович" disabled', text)
+        self.assertIn('align-items:flex-start', text)
+        self.assertIn('class="note-content"', text)
+        self.assertIn('<span class="note-icon" aria-hidden="true">🔒</span><span>После нажатия', text)
         self.assertIn('<select id="payment-method" disabled aria-disabled="true">', text)
         self.assertIn('<option selected>Оплата 🏦 СБП / 💳 Картой</option>', text)
         self.assertEqual(text.count('Оплата 🏦 СБП / 💳 Картой'), 1)
